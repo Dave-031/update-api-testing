@@ -1,0 +1,96 @@
+@echo off
+setlocal enabledelayedexpansion
+
+:: ==========================================
+:: CONFIGURATION
+:: ==========================================
+set "API_URL=https://api.cc1.dpdns.org/update.php"
+set "CURRENT_APP_VERSION=1.0.1"
+set "CURRENT_UPDATER_VERSION=1.0.2"
+set "APP_FILENAME=latest_app.zip"
+set "UPDATER_FILENAME=updater_new.cmd"
+
+:: Colors: 0 = Black, 7 = White, 2 = Green, 4 = Red, 6 = Yellow, 9 = Light Blue
+color 07
+title App Auto-Updater
+
+echo ============================================================
+echo           SYSTEM UPDATE MANAGER
+echo ============================================================
+echo.
+
+:: ------------------------------------------------------------
+:: STEP 1: Fetching API Data
+:: ------------------------------------------------------------
+echo [%time%] [9] Checking for updates...
+echo.
+
+:: Use PowerShell to parse the JSON API
+for /f "tokens=*" %%a in ('powershell -command "(Invoke-RestMethod -Uri '%API_URL%').app_version"') do set "LATEST_APP_VERSION=%%a"
+for /f "tokens=*" %%a in ('powershell -command "(Invoke-RestMethod -Uri '%API_URL%').updater.version"') do set "LATEST_UPDATER_VERSION=%%a"
+for /f "tokens=*" %%a in ('powershell -command "(Invoke-RestMethod -Uri '%API_URL%').updater.download_url"') do set "UPDATER_URL=%%a"
+for /f "tokens=*" %%a in ('powershell -command "(Invoke-RestMethod -Uri '%API_URL%').download_url"') do set "APP_URL=%%a"
+for /f "tokens=*" %%a in ('powershell -command "(Invoke-RestMethod -Uri '%API_URL%').message"') do set "MSG=%%a"
+
+echo Message from server: %MSG%
+echo.
+
+:: ------------------------------------------------------------
+:: STEP 2: Check Updater Version First
+:: ------------------------------------------------------------
+echo [Checking Updater...]
+if "%CURRENT_UPDATER_VERSION%" NEQ "%LATEST_UPDATER_VERSION%" (
+    color 06
+    echo [!] Updater is outdated! (Local: %CURRENT_UPDATER_VERSION% ^| Server: %LATEST_UPDATER_VERSION%)
+    echo [>] Downloading new updater...
+    
+    :: Download the updater (it's a .txt file per your API, so we save as .cmd)
+    curl -L -s "%UPDATER_URL%" -o "%UPDATER_FILENAME%"
+    
+    if exist "%UPDATER_FILENAME%" (
+        echo [^+] Updater downloaded successfully.
+        echo [>] Restarting updater...
+        timeout /t 2 >nul
+        start "" "%UPDATER_FILENAME%"
+        exit
+    ) else (
+        color 04
+        echo [X] Failed to download updater. Continuing with current version...
+    )
+) else (
+    color 02
+    echo [^+] Updater is up to date.
+)
+echo.
+
+:: ------------------------------------------------------------
+:: STEP 3: Check App Version
+:: ------------------------------------------------------------
+echo [Checking Application...]
+if "%CURRENT_APP_VERSION%" NEQ "%LATEST_APP_VERSION%" (
+    color 09
+    echo [!] New App Version Found! (Local: %CURRENT_APP_VERSION% ^| Server: %LATEST_APP_VERSION%)
+    echo [>] Downloading latest version from: %APP_URL%
+    
+    :: Download the App zip
+    curl -L -o "%APP_FILENAME%" "%APP_URL%"
+    
+    if exist "%APP_FILENAME%" (
+        color 02
+        echo.
+        echo ============================================================
+        echo [SUCCESS] App updated to version %LATEST_APP_VERSION%
+        echo [FILE] Saved as: %APP_FILENAME%
+        echo ============================================================
+    ) else (
+        color 04
+        echo [X] Error: Download failed.
+    )
+) else (
+    color 02
+    echo [^+] Application is already the latest version (%CURRENT_APP_VERSION%).
+)
+
+echo.
+echo Press any key to exit...
+pause >nul
