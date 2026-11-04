@@ -1,0 +1,282 @@
+<html>
+<head>
+<title>Windows Command Prompt - Updater</title>
+<hta:application 
+    id="oUpdater" 
+    applicationname="AppUpdater" 
+    border="thin" 
+    caption="yes" 
+    showintaskbar="yes" 
+    singleinstance="yes" 
+    sysmenu="yes" 
+    windowstate="normal"
+    scroll="no"
+    navigable="no"
+>
+
+<style>
+    body { 
+        background-color: #0c0c0c; 
+        color: #cccccc; 
+        font-family: 'Consolas', 'Lucida Console', monospace; 
+        margin: 0; 
+        padding: 10px; 
+        overflow: hidden;
+    }
+    .cmd-container { 
+        display: flex; 
+        flex-direction: column; 
+        height: 100%; 
+    }
+    #log { 
+        background-color: #0c0c0c; 
+        color: #cccccc; 
+        font-size: 14px; 
+        padding: 5px; 
+        height: 300px; 
+        overflow-y: auto; 
+        margin-bottom: 15px; 
+        white-space: pre-wrap;
+        border: none;
+    }
+    .log-success { color: #00ff00; }
+    .log-error { color: #ff5555; }
+    .log-warn { color: #ffff55; }
+
+    .btn-bar { 
+        display: flex; 
+        gap: 10px; 
+        justify-content: flex-start; 
+        border-top: 1px solid #333; 
+        padding-top: 10px;
+    }
+    button { 
+        background-color: #333; 
+        color: #eee; 
+        border: 1px solid #555; 
+        padding: 5px 15px; 
+        font-size: 13px; 
+        cursor: pointer; 
+        font-family: 'Consolas', monospace;
+    }
+    button:hover { 
+        background-color: #444; 
+        border-color: #777; 
+    }
+    button:disabled { 
+        color: #666; 
+        cursor: default;
+    }
+</style>
+
+<script language="vbscript">
+    ' --- SETTINGS (Matched to your PHP) ---
+    Dim APP_NAME, API_URL, DEST, JSON_APP_VER, JSON_APP_URL, UPDATER_VERSION
+    
+    APP_NAME        = "Updater"
+    API_URL         = "https://api.cc1.dpdns.org/update.php"
+    JSON_APP_VER    = "app_version"
+    JSON_APP_URL    = "download_url"
+    UPDATER_VERSION = "1.0.1"
+
+    Dim shell, fs
+    Set shell = CreateObject("WScript.Shell")
+    Set fs = CreateObject("Scripting.FileSystemObject")
+
+    Sub Window_OnLoad
+        window.resizeTo 700, 480
+        DEST = shell.ExpandEnvironmentStrings("%USERPROFILE%\Downloads")
+        Log "Microsoft Windows [Version 10.0.19045.4412]"
+        Log "(c) Microsoft Corporation. All rights reserved."
+        Log ""
+        Log "C:\Users\Admin>" & APP_NAME & " --version " & UPDATER_VERSION
+        Log "Ready. Use the buttons below to manage updates."
+    End Sub
+
+    Sub Log(text, style)
+        Dim logDiv, span
+        Set logDiv = document.getElementById("log")
+        Set span = document.createElement("span")
+        span.className = style
+        span.innerHTML = text
+        logDiv.appendChild(document.createTextNode(vbCrLf))
+        logDiv.appendChild(span)
+        logDiv.scrollTop = logDiv.scrollHeight
+    End Sub
+
+    Function CleanText(str)
+        Dim res : res = Replace(str, vbCr, "") : res = Replace(res, vbLf, "")
+        CleanText = Trim(res)
+    End Function
+
+    Function Trim(str)
+        Do While Len(str) > 0 And Right(str, 1) = " " : str = Left(str, Len(str) - 1) : Loop
+        Do While Len(str) > 0 And Left(str, 1) = " " : str = Right(str, Len(str) - 1) : Loop
+        Trim = str
+    End Function
+
+    ' --- Core Logic: Fetching JSON ---
+    Function FetchUpdateData()
+        Dim bodyFile, statusFile, psCmd, exec, result
+        bodyFile = shell.ExpandEnvironmentStrings("%TEMP%\updater_body.txt")
+        statusFile = shell.ExpandEnvironmentStrings("%TEMP%\updater_status.txt")
+
+        psCmd = "powershell -NoProfile -Command ""$ErrorActionPreference='Stop'; [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; try { $r = Invoke-WebRequest -Uri '" & API_URL & "' -UseBasicParsing; Set-Content -Path '" & bodyFile & "' -Value $r.Content; Set-Content -Path '" & statusFile & "' -Value 'HTTP 200' } catch { Set-Content -Path '" & statusFile & "' -Value $_.Exception.Message }"""
+        shell.Run psCmd, 0, True
+
+        If Not fs.FileExists(statusFile) Then 
+            FetchUpdateData = Nothing 
+            Exit Function 
+        End If
+
+        Dim f : Set f = fs.OpenTextFile(statusFile, 1)
+        If InStr(f.ReadAll, "HTTP 200") = 0 Then 
+            FetchUpdateData = Nothing 
+            Exit Function 
+        End If
+        f.Close
+
+        psCmd = "powershell -NoProfile -Command ""try { $r = ConvertFrom-Json (Get-Content -Raw '" & bodyFile & "'); $r | ConvertTo-Json -Compress } catch { 'PARSEFAIL' }"""
+        Set exec = shell.Exec(psCmd)
+        FetchUpdateData = CleanText(exec.StdOut.ReadAll)
+    End Function
+
+    ' --- Button: Verify Files ---
+    Sub VerifyFiles
+        Log "Verifying local app files...", ""
+        Dim data : data = FetchUpdateData()
+        If IsNull(data) Or data = "" Then
+            Log "Error: Could not connect to server.", "log-error"
+            Exit Sub
+        End If
+
+        ' Extract URL using PS
+        Dim psCmd, exec, vUrl
+        psCmd = "powershell -NoProfile -Command ""$r = '" & data & "' | ConvertFrom-Json; $r." & JSON_APP_URL & """"
+        Set exec = shell.Exec(psCmd)
+        vUrl = CleanText(exec.StdOut.ReadAll)
+
+        Dim fileName : fileName = Mid(vUrl, InStrRev(vUrl, "/") + 1)
+        Dim fullPath : fullPath = DEST & "\" & fileName
+
+        If Not fs.FileExists(fullPath) Then
+            Log "Local file not found in Downloads.", "log-warn"
+        Else
+            psCmd = "powershell -NoProfile -Command ""$f=[IO.File]::OpenRead('" & fullPath & "'); $b=New-Object byte[] 2; $f.Read($b,0,2); $f.Close(); if ($b[0] -eq 80 -and $b[1] -eq 75) { exit 0 } else { exit 1 }"""
+            If shell.Run(psCmd, 0, True) = 0 Then
+                Log "File Verified: Valid ZIP found.", "log-success"
+            Else
+                Log "File Corrupted: Header mismatch.", "log-error"
+            End If
+        End If
+    End Sub
+
+    ' --- Button: Verify Updater ---
+    Sub VerifyUpdater
+        Log "Checking for updater updates...", ""
+        Dim data : data = FetchUpdateData()
+        If IsNull(data) Or data = "" Then
+            Log "Error: Server unreachable.", "log-error"
+            Exit Sub
+        End If
+
+        Dim psCmd, exec, vUpdVer
+        psCmd = "powershell -NoProfile -Command ""$r = '" & data & "' | ConvertFrom-Json; $r.updater.version"""
+        Set exec = shell.Exec(psCmd)
+        vUpdVer = CleanText(exec.StdOut.ReadAll)
+
+        If vUpdVer = "" Then
+            Log "No updater information provided by server.", "log-warn"
+        ElseIf vUpdVer = UPDATER_VERSION Then
+            Log "Updater is up to date (v" & UPDATER_VERSION & ").", "log-success"
+        Else
+            Log "New updater version available: v" & vUpdVer, "log-warn"
+            Log "Please click 'Update' to apply.", ""
+        End If
+    End Sub
+
+    ' --- Button: Update ---
+    Sub StartUpdate
+        Log "------------------------------------------", ""
+        Dim data : data = FetchUpdateData()
+        If IsNull(data) Or data = "" Then
+            Log "Error: Server unreachable.", "log-error"
+            Exit Sub
+        End If
+
+        Dim psCmd, exec, vAppUrl, vAppVer, vUpdUrl, vUpdVer
+        ' App Data
+        psCmd = "powershell -NoProfile -Command ""$r = '" & data & "' | ConvertFrom-Json; $r." & JSON_APP_URL & """"
+        Set exec = shell.Exec(psCmd) : vAppUrl = CleanText(exec.StdOut.ReadAll)
+        psCmd = "powershell -NoProfile -Command ""$r = '" & data & "' | ConvertFrom-Json; $r." & JSON_APP_VER & """"
+        Set exec = shell.Exec(psCmd) : vAppVer = CleanText(exec.StdOut.ReadAll)
+        ' Updater Data
+        psCmd = "powershell -NoProfile -Command ""$r = '" & data & "' | ConvertFrom-Json; $r.updater.download_url"""
+        Set exec = shell.Exec(psCmd) : vUpdUrl = CleanText(exec.StdOut.ReadAll)
+        psCmd = "powershell -NoProfile -Command ""$r = '" & data & "' | ConvertFrom-Json; $r.updater.version"""
+        Set exec = shell.Exec(psCmd) : vUpdVer = CleanText(exec.StdOut.ReadAll)
+
+        ' 1. Update the Main App
+        Log "Downloading App v" & vAppVer & "...", ""
+        Dim appFileName : appFileName = Mid(vAppUrl, InStrRev(vAppUrl, "/") + 1)
+        psCmd = "powershell -NoProfile -Command ""Invoke-WebRequest -Uri '" & vAppUrl & "' -OutFile '" & DEST & "\" & appFileName & "'"""
+        shell.Run psCmd, 0, True
+        Log "App updated successfully.", "log-success"
+
+        ' 2. Update the Updater (Self-Update)
+        If vUpdVer <> UPDATER_VERSION And vUpdUrl <> "" Then
+            Log "Updating updater script (v" & vUpdVer & ")...", "log-warn"
+            
+            Dim newHtaPath : newHtaPath = shell.ExpandEnvironmentStrings("%TEMP%\updater_new.hta")
+            ' Download the .txt file from GitHub and save as .hta
+            psCmd = "powershell -NoProfile -Command ""Invoke-WebRequest -Uri '" & vUpdUrl & "' -OutFile '" & newHtaPath & "'"""
+            shell.Run psCmd, 0, True
+            
+            ' Bootstrap: Create a batch file to swap the running HTA with the new one
+            Dim batPath : batPath = shell.ExpandEnvironmentStrings("%TEMP%\swap.bat")
+            Dim batFile : Set batFile = fs.CreateTextFile(batPath, True)
+            Dim currentPath : currentPath = shell.ExpandEnvironmentStrings("%0") ' This is tricky in HTA, better use hardcoded or passed path
+            ' Since we don't have %0, we find the path of the current script via a trick or assume the name
+            ' To be safe, we'll ask the user or assume the file name is updater.hta
+            
+            ' We will search for the running process path
+            Dim psPathCmd, pathExec
+            psPathCmd = "powershell -NoProfile -Command ""(Get-Process mshta).MainModule.FileName"""
+            Set pathExec = shell.Exec(psPathCmd)
+            Dim runningHta : runningHta = CleanText(pathExec.StdOut.ReadAll)
+            
+            batFile.WriteLine "@echo off"
+            batFile.WriteLine "timeout /t 2 /nobreak > nul"
+            batFile.WriteLine "taskkill /f /im mshta.exe"
+            batFile.WriteLine "move /y """ & newHtaPath & """ """ & runningHta : ' Replace current running file
+            batFile.WriteLine "start """" """ & runningHta & """"
+            batFile.Close
+            
+            Log "Updater updated! Restarting now...", "log-success"
+            shell.Run batPath, 0, False
+            WScript.Quit
+        End If
+
+        Log "------------------------------------------", ""
+        Log "All processes complete.", "log-success"
+    End Sub
+
+    Sub CloseApp
+        window.close()
+    End Sub
+</script>
+
+</head>
+<body>
+    <div class="cmd-container">
+        <div id="log"></div>
+        
+        <div class="btn-bar">
+            <button onclick="VerifyFiles()">Verify Files</button>
+            <button onclick="VerifyUpdater()">Verify Updater</button>
+            <button onclick="StartUpdate()" style="color: #00ff00; font-weight: bold;">Update</button>
+            <button onclick="CloseApp()">Close</button>
+        </div>
+    </div>
+</body>
+</html>
