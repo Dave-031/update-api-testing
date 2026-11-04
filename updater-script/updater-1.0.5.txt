@@ -1,0 +1,118 @@
+@echo off
+setlocal enabledelayedexpansion
+
+:: ==========================================
+:: CONFIGURATION
+:: ==========================================
+set "API_URL=https://api.cc1.dpdns.org/update.php"
+set "APP_VER_FILE=app_version.txt"
+set "UPD_VER_FILE=updater_version.txt"
+
+:: ANSI Color Codes
+set "G=[32m" & set "Y=[33m" & set "R=[31m" & set "B=[34m" & set "C=[36m" & set "W=[0m"
+
+title System Auto-Updater
+cls
+echo %B%============================================================%W%
+echo %B%           ADVANCED SYSTEM UPDATE MANAGER%W%
+echo %B%============================================================%W%
+echo.
+
+:: ------------------------------------------------------------
+:: STEP 1: Fetching API Data
+:: ------------------------------------------------------------
+echo [%C%STEP 1%W%] %Y%Connecting to update server...%W%
+
+:: Fetch JSON data using PowerShell
+for /f "tokens=*" %%a in ('powershell -command "(Invoke-RestMethod -Uri '%API_URL%').app_version"') do set "LATEST_APP_VER=%%a"
+for /f "tokens=*" %%a in ('powershell -command "(Invoke-RestMethod -Uri '%API_URL%').updater.version"') do set "LATEST_UPD_VER=%%a"
+for /f "tokens=*" %%a in ('powershell -command "(Invoke-RestMethod -Uri '%API_URL%').updater.download_url"') do set "UPD_URL=%%a"
+for /f "tokens=*" %%a in ('powershell -command "(Invoke-RestMethod -Uri '%API_URL%').download_url"') do set "APP_URL=%%a"
+for /f "tokens=*" %%a in ('powershell -command "(Invoke-RestMethod -Uri '%API_URL%').commit_id.Substring(0,6)"') do set "SHORT_COMMIT=%%a"
+for /f "tokens=*" %%a in ('powershell -command "(Invoke-RestMethod -Uri '%API_URL%').message"') do set "MSG=%%a"
+
+echo [%G%OK%W%] Server reached. 
+echo [%C%INFO%W%] Server Message: %MSG%
+echo [%C%INFO%W%] Latest Commit: %Y%#%SHORT_COMMIT%%W%
+echo.
+
+:: ------------------------------------------------------------
+:: STEP 2: Compare and Update the Updater itself
+:: ------------------------------------------------------------
+echo [%C%STEP 2%W%] %Y%Checking updater version...%W%
+
+:: Read local updater version
+if exist "%UPD_VER_FILE%" (
+    set /p CURRENT_UPD_VER=<%UPD_VER_FILE%
+) else (
+    set "CURRENT_UPD_VER=0.0.0"
+)
+
+if "%CURRENT_UPD_VER%" NEQ "%LATEST_UPD_VER%" (
+    echo [%Y%UPDATE%W%] Updater is outdated! (%CURRENT_UPD_VER% %R%->%W% %LATEST_UPD_VER%)
+    echo [%C%ACTION%W%] Downloading latest updater script...
+    
+    curl -L -s "%UPD_URL%" -o "new_updater.cmd"
+    
+    if exist "new_updater.cmd" (
+        echo [%G%SUCCESS%W%] New updater downloaded. Applying changes...
+        
+        :: Write the new version to the file so it knows it's updated
+        echo %LATEST_UPD_VER% > "%UPD_VER_FILE%"
+        
+        :: Replace current script with new script
+        move /y "new_updater.cmd" "%~nx0" >nul
+        
+        echo [%G%RESTART%W%] Updater updated. Restarting process...
+        timeout /t 2 >nul
+        start "" "%~f0"
+        exit
+    ) else (
+        echo [%R%ERROR%W%] Failed to download updater. Skipping...
+    )
+) else (
+    echo [%G%UP TO DATE%W%] Updater is already version %CURRENT_UPD_VER%.
+)
+echo.
+
+:: ------------------------------------------------------------
+:: STEP 3: Compare and Update the Application
+:: ------------------------------------------------------------
+echo [%C%STEP 3%W%] %Y%Checking application version...%W%
+
+:: Read local app version
+if exist "%APP_VER_FILE%" (
+    set /p CURRENT_APP_VER=<%APP_VER_FILE%
+) else (
+    set "CURRENT_APP_VER=0.0.0"
+)
+
+:: We check both the version number AND if the commit-named file exists
+set "APP_FILE=app_%SHORT_COMMIT%.zip"
+
+if "%CURRENT_APP_VER%" NEQ "%LATEST_APP_VER%" (
+    if not exist "%APP_FILE%" (
+        echo [%Y%UPDATE%W%] New App Version: %CURRENT_APP_VER% %R%->%W% %LATEST_APP_VER%
+        echo [%C%ACTION%W%] Downloading %APP_FILE%...
+        
+        curl -L -o "%APP_FILE%" "%APP_URL%"
+        
+        if exist "%APP_FILE%" (
+            echo %LATEST_APP_VER% > "%APP_VER_FILE%"
+            echo [%G%SUCCESS%W%] App updated to %LATEST_APP_VER% (Commit: %SHORT_COMMIT%)
+        ) else (
+            echo [%R%ERROR%W%] Download failed.
+        )
+    ) else (
+        echo [%G%SKIP%W%] Version mismatch but commit %SHORT_COMMIT% already exists locally.
+    )
+) else (
+    echo [%G%UP TO DATE%W%] Application is already version %CURRENT_APP_VER%.
+)
+
+echo.
+echo %B%============================================================%W%
+echo %G%Process Complete!%W%
+echo %B%============================================================%W%
+echo Press any key to exit...
+pause >nul
