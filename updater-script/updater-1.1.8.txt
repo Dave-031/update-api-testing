@@ -6,7 +6,7 @@ setlocal EnableExtensions EnableDelayedExpansion
 
 :: ------------------------------- SETTINGS -----------------------------------
 :: Change these to configure the updater.
-set "UPDATER_VERSION=1.1.7"
+set "UPDATER_VERSION=1.1.8"
 :: (Version above is only a fallback. The real version is detected
 ::  automatically by comparing this file's MD5 with the server.)
 set "APP_NAME=MyApp"
@@ -24,7 +24,7 @@ set "AUTO_EXTRACT=0"
 :: 1 = wipe INSTALL_DIR before extracting, 0 = overwrite files in place
 set "CLEAN_INSTALL=0"
 :: 1 = delete older zip files after a successful update
-set "DELETE_OLD_ZIPS=1"
+set "DELETE_OLD_ZIPS=0"
 :: How many times to retry a failed download
 set "MAX_RETRIES=3"
 :: Seconds to wait between retries
