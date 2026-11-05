@@ -6,11 +6,11 @@ setlocal EnableExtensions EnableDelayedExpansion
 
 :: ------------------------------- SETTINGS -----------------------------------
 :: Change these to configure the updater.
-set "UPDATER_VERSION=1.1.5"
+set "UPDATER_VERSION=1.1.6"
 :: (Version above is only a fallback. The real version is detected
 ::  automatically by comparing this file's MD5 with the server.)
 set "APP_NAME=MyApp"
-set "API_URL=https://api.cc1.dpdns.org/update.php"
+set "API_URL=https://updapi.gavin.onl/api"
 :: Folder where downloaded zip files are kept
 set "DOWNLOAD_DIR=%~dp0downloads"
 :: Folder the app gets extracted into
