@@ -6,7 +6,7 @@ setlocal EnableExtensions EnableDelayedExpansion
 
 :: ------------------------------- SETTINGS -----------------------------------
 :: Change these to configure the updater.
-set "UPDATER_VERSION=1.1.6"
+set "UPDATER_VERSION=1.1.7"
 :: (Version above is only a fallback. The real version is detected
 ::  automatically by comparing this file's MD5 with the server.)
 set "APP_NAME=MyApp"
@@ -76,7 +76,7 @@ if /i "%~1"=="--updated" (
 echo.
 
 :: ---------------------------------------------------------------------------
-call :step "Checking required tools"
+call :step "Checking needed tools"
 where powershell >nul 2>&1 || (call :fail "PowerShell was not found. It is required." & goto :end)
 call :ok "PowerShell found"
 where certutil >nul 2>&1 && call :ok "certutil found" || call :warn "certutil not found (not required)"
