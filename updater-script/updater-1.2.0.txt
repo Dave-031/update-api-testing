@@ -1,0 +1,400 @@
+@echo off
+setlocal EnableExtensions EnableDelayedExpansion
+:: ============================================================================
+::  APP UPDATER  -  step-by-step updater with self-update support
+::
+::  Usage:  updater.bat [--force] [--check] [--no-pause]
+::    --force     reinstall even if the installed version is current
+::    --check     only report whether an update is available
+::    --no-pause  do not wait for a key press at the end
+::
+::  Settings live in updater.cfg (next to this file). It is created on the
+::  first run and is NEVER overwritten by self-updates. The values below are
+::  only the defaults.
+:: ============================================================================
+
+:: ------------------------------- DEFAULTS -----------------------------------
+set "UPDATER_VERSION=1.2.0"
+set "APP_NAME=MyApp"
+set "API_URL=https://update.cc1.dpdns.org/api/latest"
+set "DOWNLOAD_DIR=%~dp0downloads"
+set "INSTALL_DIR=%~dp0app"
+set "VERSION_FILE=%~dp0installed_version.txt"
+set "LOG_FILE=%~dp0updater.log"
+set "SELF_UPDATE=1"
+set "AUTO_EXTRACT=0"
+set "CLEAN_INSTALL=0"
+set "DELETE_OLD_ZIPS=0"
+set "MAX_RETRIES=3"
+set "RETRY_DELAY=3"
+set "PAUSE_AT_END=1"
+set "USE_COLOR=1"
+
+:: ------------------------------- COLORS -------------------------------------
+set "C_TITLE=96"
+set "C_STEP=95"
+set "C_INFO=97"
+set "C_OK=92"
+set "C_WARN=93"
+set "C_ERR=91"
+set "C_DIM=90"
+set "C_VAL=94"
+
+:: ---------------------------- LOAD SETTINGS ---------------------------------
+set "CFG=%~dp0updater.cfg"
+if not exist "%CFG%" call :write_cfg
+for /f "usebackq eol=# tokens=1,* delims==" %%a in ("%CFG%") do set "%%a=%%b"
+
+:: ---------------------------- COMMAND LINE ----------------------------------
+set "EXIT_CODE=0"
+set "HAVE_CURL=0"
+set "OPT_FORCE=0"
+set "OPT_CHECK=0"
+set "JUST_UPDATED=0"
+set "REPLACES="
+set "PASS_ARGS="
+:parse_args
+if "%~1"=="" goto :args_done
+if /i "%~1"=="--force" (set "OPT_FORCE=1" & set "PASS_ARGS=!PASS_ARGS! --force")
+if /i "%~1"=="--check" (set "OPT_CHECK=1" & set "PASS_ARGS=!PASS_ARGS! --check")
+if /i "%~1"=="--no-pause" (set "PAUSE_AT_END=0" & set "PASS_ARGS=!PASS_ARGS! --no-pause")
+if /i "%~1"=="--updated" (
+    set "JUST_UPDATED=1"
+    if not "%~2"=="" set "UPDATER_VERSION=%~2"
+    shift
+)
+if /i "%~1"=="--replaces" (
+    set "REPLACES=%~2"
+    shift
+)
+shift
+goto :parse_args
+:args_done
+
+:: ------------------------------ SETUP ---------------------------------------
+title %APP_NAME% Updater
+for /f %%a in ('echo prompt $E^| cmd') do set "ESC=%%a"
+if "%USE_COLOR%"=="1" (
+    set "T=%ESC%[%C_TITLE%m" & set "S=%ESC%[%C_STEP%m" & set "I=%ESC%[%C_INFO%m"
+    set "G=%ESC%[%C_OK%m"    & set "W=%ESC%[%C_WARN%m" & set "E=%ESC%[%C_ERR%m"
+    set "D=%ESC%[%C_DIM%m"   & set "V=%ESC%[%C_VAL%m"  & set "R=%ESC%[0m"
+) else (
+    set "T=" & set "S=" & set "I=" & set "G=" & set "W=" & set "E=" & set "D=" & set "V=" & set "R="
+)
+
+set "TOTAL_STEPS=7"
+set "STEP=0"
+set "TMP_DIR=%TEMP%\%APP_NAME%_updater"
+set "API_VARS=%TMP_DIR%\api_vars.txt"
+if not exist "%TMP_DIR%" mkdir "%TMP_DIR%"
+if exist "%LOG_FILE%" for %%f in ("%LOG_FILE%") do if %%~zf GTR 200000 del /q "%%f" >nul 2>&1
+
+echo.
+echo %T%=================================================================%R%
+echo %T%   %APP_NAME% Updater  v%UPDATER_VERSION%%R%
+echo %T%=================================================================%R%
+call :log "=== Updater v%UPDATER_VERSION% started ==="
+if "%JUST_UPDATED%"=="1" call :ok "Updater was updated to v%UPDATER_VERSION%, continuing."
+
+:: ---------------------------------------------------------------------------
+call :step "Checking needed tools"
+where powershell >nul 2>&1 || (call :fail "PowerShell was not found. It is required." & goto :end)
+call :ok "PowerShell found"
+where certutil >nul 2>&1 || (call :fail "certutil was not found. It is required for file checks." & goto :end)
+call :ok "certutil found"
+where curl.exe >nul 2>&1 && (set "HAVE_CURL=1" & call :ok "curl found (download progress bar enabled)") || call :info "curl not found, using the PowerShell downloader"
+
+:: ---------------------------------------------------------------------------
+call :step "Contacting update server"
+call :kv "API" "%API_URL%"
+if exist "%API_VARS%" del /q "%API_VARS%" >nul 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "try { [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12;" ^
+  "$j = Invoke-RestMethod -Uri '%API_URL%' -UseBasicParsing -TimeoutSec 20;" ^
+  "$f = {param($x) if ($x) { ([string]$x).Trim() } else { '-' }};" ^
+  "$m = ((& $f $j.message) -replace '[^A-Za-z0-9 .,:/_+-]','');" ^
+  "$o = @(('COMMIT_ID=' + (& $f $j.commit_id)), ('LATEST_VERSION=' + (& $f $j.latest_version)), ('DOWNLOAD_URL=' + (& $f $j.download_url))," ^
+  "('FILE_SIZE=' + (& $f $j.size)), ('FILE_SHA=' + (& $f $j.sha256).ToLower()), ('UPD_VERSION=' + (& $f $j.updater.version))," ^
+  "('UPD_URL=' + (& $f $j.updater.download_url)), ('UPD_SHA=' + (& $f $j.updater.sha256).ToLower()), ('API_MESSAGE=' + $m));" ^
+  "$o | Set-Content -Encoding ASCII '%API_VARS%'; exit 0 } catch { Write-Host $_.Exception.Message; exit 1 }"
+if errorlevel 1 (call :fail "Could not reach the update server." & goto :end)
+if not exist "%API_VARS%" (call :fail "Server gave no usable answer." & goto :end)
+for /f "usebackq tokens=1,* delims==" %%a in ("%API_VARS%") do set "%%a=%%b"
+for %%k in (COMMIT_ID LATEST_VERSION DOWNLOAD_URL FILE_SIZE FILE_SHA UPD_VERSION UPD_URL UPD_SHA API_MESSAGE) do if "!%%k!"=="-" set "%%k="
+for %%k in (COMMIT_ID LATEST_VERSION DOWNLOAD_URL FILE_SHA) do if not defined %%k (call :fail "Server response is missing %%k." & goto :end)
+if /i not "!DOWNLOAD_URL:~0,8!"=="https://" (call :fail "Refusing a download link that is not HTTPS." & goto :end)
+set "SHORT_COMMIT=%COMMIT_ID:~0,7%"
+if defined API_MESSAGE call :ok "Server says: %API_MESSAGE%"
+call :kv "Latest app version" "%LATEST_VERSION% (commit %SHORT_COMMIT%)"
+if defined FILE_SIZE (
+    set /a SIZE_MB=FILE_SIZE/1048576
+    call :kv "Download size" "!SIZE_MB! MB"
+)
+if defined UPD_VERSION call :kv "Latest updater" "%UPD_VERSION%"
+
+:: ---------------------------------------------------------------------------
+call :step "Checking for updater updates"
+if "%SELF_UPDATE%"=="0" (call :info "Disabled in updater.cfg." & goto :after_self)
+if not defined UPD_SHA (call :info "The server has no updater to offer." & goto :after_self)
+if not defined UPD_URL (call :info "The server has no updater to offer." & goto :after_self)
+if not defined UPD_VERSION set "UPD_VERSION=latest"
+set "MARKER=%~dp0.updater_attempt"
+call :hash "%~f0"
+set "SELF_SHA=!HASH!"
+call :kv "This updater SHA-256" "!SELF_SHA:~0,16!..."
+call :kv "Latest updater SHA-256" "%UPD_SHA:~0,16%..."
+if /i "!SELF_SHA!"=="%UPD_SHA%" (
+    if exist "!MARKER!" del /f /q "!MARKER!" >nul 2>&1
+    call :cleanup_old
+    set "UPDATER_VERSION=%UPD_VERSION%"
+    title %APP_NAME% Updater v%UPD_VERSION%
+    call :ok "Updater is the latest version: v%UPD_VERSION%"
+    goto :after_self
+)
+:: Loop guard 1: we were started by a previous updater
+if "!JUST_UPDATED!"=="1" (
+    call :warn "Already switched once, not switching again. Check the server hash."
+    goto :after_self
+)
+:: Loop guard 2: we already tried this exact version (works even if arguments get lost)
+set "LAST_TRY="
+if exist "!MARKER!" set /p LAST_TRY=<"!MARKER!"
+if /i "!LAST_TRY!"=="%UPD_SHA%" (
+    del /f /q "!MARKER!" >nul 2>&1
+    call :warn "Already tried switching to this version, continuing with the current one."
+    goto :after_self
+)
+call :warn "Updater is out of date. Getting v%UPD_VERSION%..."
+set "NEW_UPDATER=%~dp0updater-%UPD_VERSION%.bat"
+if /i "!NEW_UPDATER!"=="%~f0" set "NEW_UPDATER=%~dp0updater-%UPD_VERSION%-new.bat"
+if exist "!NEW_UPDATER!" del /f /q "!NEW_UPDATER!" >nul 2>&1
+call :download "%UPD_URL%" "!NEW_UPDATER!"
+if errorlevel 1 (call :warn "Updater download failed, continuing with the current one." & goto :after_self)
+call :hash "!NEW_UPDATER!"
+if /i not "!HASH!"=="%UPD_SHA%" (
+    call :warn "Download hash mismatch, not switching."
+    del /f /q "!NEW_UPDATER!" >nul 2>&1
+    goto :after_self
+)
+call :ok "New updater verified."
+> "!MARKER!" echo %UPD_SHA%
+call :info "Switching to the new updater..."
+:: The new updater deletes this old file itself once it has started (--replaces).
+start "%APP_NAME% Updater" "!NEW_UPDATER!" --updated %UPD_VERSION% --replaces "%~f0"!PASS_ARGS!
+endlocal
+exit /b 0
+:after_self
+
+:: ---------------------------------------------------------------------------
+call :step "Checking your current version"
+set "INSTALLED_VERSION=none"
+set "INSTALLED_COMMIT=none"
+if exist "%VERSION_FILE%" (
+    for /f "usebackq tokens=1,* delims==" %%a in ("%VERSION_FILE%") do set "INSTALLED_%%a=%%b"
+)
+call :kv "Installed version" "!INSTALLED_VERSION! (commit !INSTALLED_COMMIT:~0,7!)"
+set "ZIP_NAME=%APP_NAME%-%LATEST_VERSION%-%SHORT_COMMIT%.zip"
+set "ZIP_PATH=%DOWNLOAD_DIR%\%ZIP_NAME%"
+if not exist "%DOWNLOAD_DIR%" mkdir "%DOWNLOAD_DIR%"
+
+set "NEED_DOWNLOAD=1"
+set "NEED_INSTALL=1"
+if "%AUTO_EXTRACT%"=="0" set "NEED_INSTALL=0"
+if "%AUTO_EXTRACT%"=="1" if "%OPT_FORCE%"=="0" if /i "!INSTALLED_COMMIT!"=="%COMMIT_ID%" if exist "%INSTALL_DIR%\" (
+    set "NEED_INSTALL=0"
+    set "NEED_DOWNLOAD=0"
+)
+if "!NEED_DOWNLOAD!"=="1" if exist "%ZIP_PATH%" (
+    call :info "Found existing %ZIP_NAME%, checking it..."
+    call :hash "%ZIP_PATH%"
+    if /i "!HASH!"=="%FILE_SHA%" (
+        call :ok "Existing download is valid."
+        set "NEED_DOWNLOAD=0"
+    ) else (
+        call :warn "Existing file is damaged or outdated, it will be downloaded again."
+        del /q "%ZIP_PATH%" >nul 2>&1
+    )
+)
+if "%OPT_CHECK%"=="1" (
+    if "!NEED_DOWNLOAD!!NEED_INSTALL!"=="00" (call :ok "You are up to date.") else (call :warn "Update available: v%LATEST_VERSION%")
+    goto :end
+)
+if "!NEED_DOWNLOAD!!NEED_INSTALL!"=="00" call :ok "Already up to date. Use --force to reinstall."
+
+:: ---------------------------------------------------------------------------
+call :step "Downloading update"
+if "!NEED_DOWNLOAD!"=="0" (call :ok "Nothing to download." & goto :after_dl)
+set /a TRY=0
+:dl_retry
+set /a TRY+=1
+call :info "Attempt !TRY!/%MAX_RETRIES%: %ZIP_NAME%"
+set "DL_OK=0"
+call :download "%DOWNLOAD_URL%" "%ZIP_PATH%.part"
+if not errorlevel 1 (
+    call :hash "%ZIP_PATH%.part"
+    if /i "!HASH!"=="%FILE_SHA%" set "DL_OK=1"
+)
+if "!DL_OK!"=="1" (
+    move /y "%ZIP_PATH%.part" "%ZIP_PATH%" >nul
+    call :ok "Download complete and SHA-256 verified."
+    goto :after_dl
+)
+call :warn "Download failed or did not verify."
+del /q "%ZIP_PATH%.part" >nul 2>&1
+if !TRY! LSS %MAX_RETRIES% (
+    call :warn "Retrying in %RETRY_DELAY% seconds..."
+    call :sleep %RETRY_DELAY%
+    goto :dl_retry
+)
+call :fail "Download failed after %MAX_RETRIES% attempts."
+goto :end
+:after_dl
+
+:: ---------------------------------------------------------------------------
+call :step "Installing update"
+if "%AUTO_EXTRACT%"=="0" (call :info "Auto-extract is off. File saved to: %ZIP_PATH%" & goto :after_install)
+if "!NEED_INSTALL!"=="0" (call :ok "v%LATEST_VERSION% is already installed." & goto :after_install)
+set "EXTRACT_TO=%INSTALL_DIR%"
+if "%CLEAN_INSTALL%"=="1" set "EXTRACT_TO=%INSTALL_DIR%.staging"
+if "%CLEAN_INSTALL%"=="1" if exist "!EXTRACT_TO!" rmdir /s /q "!EXTRACT_TO!"
+if not exist "!EXTRACT_TO!" mkdir "!EXTRACT_TO!"
+call :kv "Extracting to" "!EXTRACT_TO!"
+powershell -NoProfile -Command "try { Expand-Archive -LiteralPath '%ZIP_PATH%' -DestinationPath '!EXTRACT_TO!' -Force; exit 0 } catch { Write-Host $_.Exception.Message; exit 1 }"
+if errorlevel 1 (
+    call :fail "Extraction failed. Your existing install was not changed."
+    if "%CLEAN_INSTALL%"=="1" rmdir /s /q "!EXTRACT_TO!" >nul 2>&1
+    goto :end
+)
+if "%CLEAN_INSTALL%"=="1" (
+    :: Clean install: set the old folder aside first, so a locked folder cannot leave a half-deleted app
+    if exist "%INSTALL_DIR%.old" rmdir /s /q "%INSTALL_DIR%.old" >nul 2>&1
+    if exist "%INSTALL_DIR%\" for %%d in ("%INSTALL_DIR%") do ren "%INSTALL_DIR%" "%%~nxd.old"
+    if exist "%INSTALL_DIR%\" (
+        call :fail "The old install is in use. Close %APP_NAME% and run the updater again."
+        rmdir /s /q "!EXTRACT_TO!" >nul 2>&1
+        goto :end
+    )
+    for %%d in ("%INSTALL_DIR%") do ren "!EXTRACT_TO!" "%%~nxd"
+    rmdir /s /q "%INSTALL_DIR%.old" >nul 2>&1
+)
+> "%VERSION_FILE%" (
+    echo VERSION=%LATEST_VERSION%
+    echo COMMIT=%COMMIT_ID%
+)
+call :ok "Installed %APP_NAME% v%LATEST_VERSION% (%SHORT_COMMIT%)"
+:after_install
+
+:: ---------------------------------------------------------------------------
+call :step "Cleaning up"
+if "%DELETE_OLD_ZIPS%"=="1" (
+    for %%f in ("%DOWNLOAD_DIR%\%APP_NAME%-*.zip") do if /i not "%%~nxf"=="%ZIP_NAME%" (
+        del /q "%%f" >nul 2>&1
+        call :info "Removed old file %%~nxf"
+    )
+)
+del /q "%DOWNLOAD_DIR%\*.part" >nul 2>&1
+rmdir /s /q "%TMP_DIR%" >nul 2>&1
+call :ok "Done."
+
+echo.
+echo %G%=================================================================%R%
+echo %G%   Finished.  %APP_NAME% is on v%LATEST_VERSION% (%SHORT_COMMIT%)%R%
+echo %G%=================================================================%R%
+goto :end
+
+:: =============================== HELPERS ====================================
+:step
+set /a STEP+=1
+set "_m=%~1"
+echo.
+echo %S%[Step !STEP!/%TOTAL_STEPS%]%R% %I%!_m!...%R%
+call :log "STEP !STEP!: %~1"
+exit /b 0
+
+:info
+set "_m=%~1"
+echo    %D%-%R% %I%!_m!%R%
+call :log "%~1"
+exit /b 0
+
+:kv
+set "_k=%~1"
+set "_v=%~2"
+echo    %D%-%R% %I%!_k!:%R% %V%!_v!%R%
+call :log "!_k!: !_v!"
+exit /b 0
+
+:ok
+set "_m=%~1"
+echo    %G%[OK]%R% !_m!
+call :log "OK: %~1"
+exit /b 0
+
+:warn
+set "_m=%~1"
+echo    %W%[WARN]%R% %W%!_m!%R%
+call :log "WARN: %~1"
+exit /b 0
+
+:fail
+set "_m=%~1"
+set "EXIT_CODE=1"
+echo    %E%[FAIL] !_m!%R%
+call :log "FAIL: %~1"
+exit /b 0
+
+:log
+set "_l=%~1"
+>>"%LOG_FILE%" echo [%date% %time%] !_l!
+exit /b 0
+
+:sleep
+set /a _n=%~1+1
+ping -n !_n! 127.0.0.1 >nul
+exit /b 0
+
+:: :download <url> <outfile>  -> errorlevel 0 on success
+:download
+if "%HAVE_CURL%"=="1" (
+    curl.exe -L --fail --connect-timeout 20 -# -o "%~2" "%~1"
+    exit /b !errorlevel!
+)
+powershell -NoProfile -Command "try { [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; $ProgressPreference='SilentlyContinue'; (New-Object Net.WebClient).DownloadFile('%~1','%~2'); exit 0 } catch { Write-Host $_.Exception.Message; exit 1 }"
+exit /b %errorlevel%
+
+:: :hash <file>  -> sets HASH (SHA-256, lowercase). certutil is much faster than starting PowerShell.
+:hash
+set "HASH="
+for /f "skip=1 delims=" %%h in ('certutil -hashfile "%~1" SHA256 2^>nul') do if not defined HASH set "HASH=%%h"
+if defined HASH set "HASH=!HASH: =!"
+exit /b 0
+
+:: Removes leftover updater files from earlier versions
+:cleanup_old
+for %%f in ("%~dp0updater-*.bat") do if /i not "%%~ff"=="%~f0" del /f /q "%%~ff" >nul 2>&1
+if defined REPLACES if /i not "!REPLACES!"=="%~f0" if exist "!REPLACES!" del /f /q "!REPLACES!" >nul 2>&1
+exit /b 0
+
+:: Creates updater.cfg on the first run
+:write_cfg
+>"%CFG%"  echo # Updater settings. This file is kept when the updater updates itself.
+>>"%CFG%" echo # Lines starting with # are ignored. Remove the # to override a default.
+>>"%CFG%" echo APP_NAME=%APP_NAME%
+>>"%CFG%" echo SELF_UPDATE=%SELF_UPDATE%
+>>"%CFG%" echo AUTO_EXTRACT=%AUTO_EXTRACT%
+>>"%CFG%" echo CLEAN_INSTALL=%CLEAN_INSTALL%
+>>"%CFG%" echo DELETE_OLD_ZIPS=%DELETE_OLD_ZIPS%
+>>"%CFG%" echo MAX_RETRIES=%MAX_RETRIES%
+>>"%CFG%" echo RETRY_DELAY=%RETRY_DELAY%
+>>"%CFG%" echo PAUSE_AT_END=%PAUSE_AT_END%
+>>"%CFG%" echo USE_COLOR=%USE_COLOR%
+>>"%CFG%" echo #API_URL=%API_URL%
+>>"%CFG%" echo #DOWNLOAD_DIR=%DOWNLOAD_DIR%
+>>"%CFG%" echo #INSTALL_DIR=%INSTALL_DIR%
+exit /b 0
+
+:end
+echo.
+call :log "Finished with exit code !EXIT_CODE!"
+if "%PAUSE_AT_END%"=="1" pause
+endlocal & exit /b %EXIT_CODE%
